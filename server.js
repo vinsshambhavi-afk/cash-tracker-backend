@@ -1,19 +1,35 @@
+```js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const admin = require('firebase-admin');
 
 const app = express();
+
 app.use(express.json());
 app.use(cors());
 
-// 1. Connect to MongoDB Atlas
-const MONGO_URI = "mongodb+srv://vinsshambhavi:vinsadmin@cluster0.mongodb.net/vinsnetbill?retryWrites=true&w=majority";
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("Connected to MongoDB Successfully"))
-  .catch(err => console.error("MongoDB Connection Error:", err));
+// Root route
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'running',
+    app: 'VINS Bills Backend',
+    message: 'Backend server is online'
+  });
+});
 
-// 2. Schemas & Models
+// Health route
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    database: mongoose.connection.readyState === 1
+      ? 'connected'
+      : 'disconnected'
+  });
+});
+
+// MongoDB connection
+const MONGO_URI = process.env.MONGODB_URI;
+
 const CashSchema = new mongoose.Schema({
   receiptNo: String,
   subscriber: String,
@@ -21,81 +37,143 @@ const CashSchema = new mongoose.Schema({
   paymentMethod: String,
   date: { type: Date, default: Date.now }
 });
+
 const CashRecord = mongoose.model('CashRecord', CashSchema);
 
-// OTP Schema for SMS Login
 const OtpSchema = new mongoose.Schema({
   mobile: { type: String, required: true },
   otp: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now, expires: 300 } // Expires in 5 mins
+  createdAt: {
+    type: Date,
+    default: Date.now,
+    expires: 300
+  }
 });
+
 const OTPModel = mongoose.model('OTP', OtpSchema);
 
-// User Schema
 const UserSchema = new mongoose.Schema({
-  name: { type: String, default: "Vins Admin" },
-  mobile: { type: String, unique: true, default: "+91 8147422496" },
-  role: { type: String, default: "Admin Master" }
+  name: { type: String, default: 'Vins Admin' },
+  mobile: { type: String, unique: true },
+  role: { type: String, default: 'Admin Master' }
 });
+
 const UserModel = mongoose.model('User', UserSchema);
 
-// 3. SMS OTP Authentication Routes
+// OTP routes
 app.post('/api/auth/send-otp', async (req, res) => {
   const { mobile } = req.body;
-  if (!mobile) return res.status(400).json({ success: false, message: "Mobile number required" });
 
-  // Generate 6 digit OTP (Hardcoded demo OTP '123456' for +91 8147422496 for quick access)
-  const otp = (mobile === "+91 8147422496") ? "123456" : Math.floor(100000 + Math.random() * 900000).toString();
+  if (!mobile) {
+    return res.status(400).json({
+      success: false,
+      message: 'Mobile number required'
+    });
+  }
+
+  // Demo only: integrate a real SMS provider before production.
+  const otp = Math.floor(
+    100000 + Math.random() * 900000
+  ).toString();
 
   try {
     await OTPModel.deleteMany({ mobile });
     await OTPModel.create({ mobile, otp });
-    console.log(`[SMS Gateway] Sent OTP ${otp} to ${mobile}`);
-    res.json({ success: true, message: `OTP sent successfully to ${mobile}`, demoOtp: otp });
+
+    // Do not return OTPs to users in production.
+    console.log(`OTP generated for ${mobile}`);
+
+    res.json({
+      success: true,
+      message: 'OTP generated. SMS delivery must be configured.'
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error generating OTP", error });
+    res.status(500).json({
+      success: false,
+      message: 'Error generating OTP'
+    });
   }
 });
 
 app.post('/api/auth/verify-otp', async (req, res) => {
   const { mobile, otp } = req.body;
+
   try {
     const validOtp = await OTPModel.findOne({ mobile, otp });
+
     if (!validOtp) {
-      return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired OTP'
+      });
     }
 
     let user = await UserModel.findOne({ mobile });
+
     if (!user) {
-      user = await UserModel.create({ name: "Vins Admin", mobile, role: "Admin Master" });
+      user = await UserModel.create({
+        name: 'Vins Admin',
+        mobile,
+        role: 'Admin Master'
+      });
     }
 
     await OTPModel.deleteOne({ _id: validOtp._id });
+
     res.json({ success: true, user });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Verification failed", error });
+    res.status(500).json({
+      success: false,
+      message: 'Verification failed'
+    });
   }
 });
 
-// 4. Cash Records Routes
+// Cash record routes
 app.get('/api/cash-records', async (req, res) => {
   try {
     const records = await CashRecord.find().sort({ date: -1 });
     res.json({ success: true, records });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
 app.post('/api/cash-records', async (req, res) => {
   try {
-    const newRecord = new CashRecord(req.body);
-    await newRecord.save();
-    res.json({ success: true, record: newRecord });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    const record = await CashRecord.create(req.body);
+    res.json({ success: true, record });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+async function startServer() {
+  const PORT = process.env.PORT || 5000;
+
+  if (!MONGO_URI) {
+    console.error('Missing MONGODB_URI environment variable');
+    process.exit(1);
+  }
+
+  try {
+    await mongoose.connect(MONGO_URI);
+    console.log('Connected to MongoDB successfully');
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('MongoDB connection failed:', error.message);
+    process.exit(1);
+  }
+}
+
+startServer();
+```
