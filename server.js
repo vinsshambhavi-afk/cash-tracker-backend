@@ -1,4 +1,3 @@
-```js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -60,9 +59,9 @@ const UserSchema = new mongoose.Schema({
 
 const UserModel = mongoose.model('User', UserSchema);
 
-// OTP routes
+// OTP route with Textbee SMS integration
 app.post('/api/auth/send-otp', async (req, res) => {
-  const { mobile } = req.body;
+  const { mobile, adminName } = req.body;
 
   if (!mobile) {
     return res.status(400).json({
@@ -71,35 +70,82 @@ app.post('/api/auth/send-otp', async (req, res) => {
     });
   }
 
-  // Demo only: integrate a real SMS provider before production.
-  const otp = Math.floor(
-    100000 + Math.random() * 900000
-  ).toString();
+  // Format clean 10-digit mobile number
+  const cleanMobile = mobile.replace(/\D/g, '').slice(-10);
+  const formattedPhone = `+91${cleanMobile}`;
+
+  // Generate 6-digit random OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
   try {
-    await OTPModel.deleteMany({ mobile });
-    await OTPModel.create({ mobile, otp });
+    await OTPModel.deleteMany({ mobile: cleanMobile });
+    await OTPModel.create({ mobile: cleanMobile, otp });
 
-    // Do not return OTPs to users in production.
-    console.log(`OTP generated for ${mobile}`);
+    // Textbee Configuration from Environment Variables
+    const apiKey = process.env.TEXTBEE_API_KEY;
+    const deviceId = process.env.TEXTBEE_DEVICE_ID;
+
+    if (!apiKey || !deviceId) {
+      console.warn('Textbee API credentials missing in environment variables.');
+      return res.status(500).json({
+        success: false,
+        message: 'SMS gateway not configured on server (Missing API Key/Device ID)'
+      });
+    }
+
+    const messageText = `Your VinsNetBill ISP verification code is ${otp}. Valid for 10 minutes. Do not share this OTP with anyone. - Telecom DLT: VINSBL`;
+
+    // Dispatch SMS via Textbee Gateway
+    const textbeeResponse = await fetch(`[https://api.textbee.dev/api/v1/gateway/devices/$](https://api.textbee.dev/api/v1/gateway/devices/$){deviceId}/send-sms`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        recipients: [formattedPhone],
+        message: messageText
+      })
+    });
+
+    const textbeeData = await textbeeResponse.json();
+
+    if (!textbeeResponse.ok) {
+      console.error('Textbee API Error:', textbeeData);
+      return res.status(500).json({
+        success: false,
+        message: textbeeData.message || 'Failed to dispatch SMS via Textbee'
+      });
+    }
+
+    console.log(`OTP ${otp} successfully sent to ${formattedPhone} via Textbee.`);
 
     res.json({
       success: true,
-      message: 'OTP generated. SMS delivery must be configured.'
+      message: 'SMS OTP dispatched successfully to mobile number'
     });
   } catch (error) {
+    console.error('Error generating/sending OTP:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error generating OTP'
+      message: error.message || 'Error generating OTP'
     });
   }
 });
 
+// Also support alternative endpoint path used by frontend
+app.post('/api/send-sms-otp', async (req, res) => {
+  const { phone, adminName } = req.body;
+  req.body.mobile = phone;
+  return app._router.handle(req, res);
+});
+
 app.post('/api/auth/verify-otp', async (req, res) => {
   const { mobile, otp } = req.body;
+  const cleanMobile = mobile ? mobile.replace(/\D/g, '').slice(-10) : '';
 
   try {
-    const validOtp = await OTPModel.findOne({ mobile, otp });
+    const validOtp = await OTPModel.findOne({ mobile: cleanMobile, otp: otp ? otp.trim() : '' });
 
     if (!validOtp) {
       return res.status(400).json({
@@ -108,12 +154,12 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       });
     }
 
-    let user = await UserModel.findOne({ mobile });
+    let user = await UserModel.findOne({ mobile: cleanMobile });
 
     if (!user) {
       user = await UserModel.create({
         name: 'Vins Admin',
-        mobile,
+        mobile: cleanMobile,
         role: 'Admin Master'
       });
     }
@@ -176,4 +222,3 @@ async function startServer() {
 }
 
 startServer();
-```
